@@ -1,0 +1,267 @@
+/**
+ * The `dsh-sidechat:history` tab: every follow-up session grouped by its ROOT
+ * (main) session, rendered as a layered tree (main → follow-up → nested
+ * follow-up). Clicking a node jumps into it. The tree is driven by the
+ * plugin's self-maintained parent→children mapping, restricted to the CURRENT
+ * workspace: only sessions accounted in the workspace owning the active
+ * session are shown (mirror of the DSH runtime's current-workspace projection
+ * over the `workspaces` list, where each workspace carries its sessionIds).
+ *
+ * Rows with follow-ups (leaf nodes) carry a right-aligned fold button whose
+ * chevron rotates with the collapse state, and the row's most recent activity
+ * time to its left — the same compact relative label ("刚刚"/"5分钟"/…) the
+ * DSH left (workspace browser) panel uses.
+ */
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import type { Context, SidechatSessionListSnapshot, SidechatTabComponentProps } from '../context-types.ts'
+import type { SidechatStore } from './store.ts'
+import { resolveCurrentSessionId } from './current-session.ts'
+import { filterHistoryToWorkspace, rootsOf, sessionStatus, subtreeLatestUpdatedAt, workspaceOwningSession } from './history-scope.ts'
+import { timeLabel } from './history-time.ts'
+import { t } from './locales.ts'
+import { iconOf } from './host-primitives.ts'
+import { Glyph } from './primitives.ts'
+import { useLocaleRevision } from './use-locale.ts'
+import css from './history-panel.module.css'
+
+/**
+ * The fold chevron, resolved by NAME rather than imported: DSH renamed its whole
+ * icon set in 0.1.7 (size suffix → weight suffix, no aliases), so the named import
+ * this file used to carry is `undefined` at render time — and React renders
+ * `undefined` as "Element type is invalid" (error #130). `primitives.ts` owns the
+ * rule and the fallback chain; `undefined` means "this host has no such glyph",
+ * which {@link Glyph} draws as nothing.
+ */
+const FoldArrow = iconOf('IconTriangleRightFill', 14)
+
+interface HistoryPanelProps extends Omit<SidechatTabComponentProps, 'store'> {
+  store: SidechatStore
+}
+
+/** How often the relative-time labels refresh while the tab is visible. */
+const NOW_TICK_MS = 60_000
+
+export function HistoryPanel({ ctx, store, scope, visible, sidebar, tab }: HistoryPanelProps) {
+  // Follow the DSH language: t() reads at call time, so this single root
+  // re-render re-localizes the whole tree (keep it free of React.memo). The
+  // returned revision is unused here — subscribing IS the point.
+  useLocaleRevision()
+  const snapshot = useSyncExternalStore(
+    (cb: () => void) => store.subscribe(cb),
+    () => store.getSnapshot(),
+  )
+
+  // Neither the tab chip nor panel expansion needs anything from this panel:
+  // `sidebar-native.ts` registers a live title seat (so the chip re-localizes on
+  // its own), and `openTab` expands the column as part of placing the tab.
+
+  // Land (or focus) this plugin's history tab in a session's sidebar. Stable
+  // across renders so the tree's nodes do not re-render on every tick; `sidebar`
+  // is the occurrence handed down once per navigation.
+  const openHistory = useCallback(
+    (sessionId: string) => { sidebar?.openHistory({ sessionId }) },
+    [sidebar],
+  )
+
+  // The workspace feed (session↔workspace membership is not in the session
+  // list; the workspaces list is the authoritative projection).
+  const workspaceList = useSyncExternalStore(
+    (cb: () => void) => ctx.workspaces.list.subscribe(cb),
+    () => ctx.workspaces.list.getSnapshot(),
+  )
+  const sessionList = useSyncExternalStore(
+    (cb: () => void) => ctx.sessions.list.subscribe(cb),
+    () => ctx.sessions.list.getSnapshot(),
+  )
+
+  // Relative-time labels need a fresh "now" (mirror of the left panel's render
+  // clock); tick while the tab is visible so "5分钟" does not go stale.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!visible) return
+    const timer = window.setInterval(() => { setNow(Date.now()) }, NOW_TICK_MS)
+    return () => { window.clearInterval(timer) }
+  }, [visible])
+
+  // Current workspace = the one owning the active session (same projection as
+  // the DSH runtime's startSession). When no workspace can be resolved (no
+  // active session, or it is still ungrouped), fall back to the unfiltered
+  // tree so records are never hidden by an undeterminable scope.
+  const currentSessionId = scope.sessionId !== '' ? scope.sessionId : resolveCurrentSessionId(sessionList)
+  const currentWorkspace = currentSessionId === undefined
+    ? undefined
+    : workspaceOwningSession(workspaceList.items, currentSessionId)
+  const parentToChildren = currentWorkspace === undefined
+    ? snapshot.parentToChildren
+    : filterHistoryToWorkspace(snapshot.parentToChildren, new Set(currentWorkspace.sessionIds))
+
+  // Archive set (registry-global): an archived session is hidden from every
+  // workspace's sessionIds but still accounted — its mapping row survives, so
+  // it must be classified explicitly instead of relying on the workspace filter.
+  const archivedIds = new Set(workspaceList.archivedSessionIds)
+
+  const roots = rootsOf(parentToChildren)
+
+  if (roots.length === 0) {
+    return (
+      <div className={css.root}>
+        <div className={css.empty}>
+          {currentWorkspace === undefined ? t('histEmptyAll') : t('histEmptyWorkspace')}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className={css.root} role="tree" aria-label={t('histTabTitle')}>
+      {currentWorkspace !== undefined && (
+        <div className={css.workspaceLabel}>{t('histWorkspace', { name: currentWorkspace.title || currentWorkspace.workspaceId })}</div>
+      )}
+      {roots.map((rootId) => (
+        <TreeNode
+          key={rootId}
+          ctx={ctx}
+          id={rootId}
+          depth={0}
+          store={store}
+          sessionList={sessionList}
+          now={now}
+          parentToChildren={parentToChildren}
+          archivedIds={archivedIds}
+          openHistory={openHistory}
+        />
+      ))}
+    </div>
+  )
+}
+
+/** One tree node: the session row plus its recursive children. */
+function TreeNode(props: {
+  ctx: Context
+  id: string
+  depth: number
+  store: SidechatStore
+  sessionList: SidechatSessionListSnapshot
+  now: number
+  parentToChildren: Record<string, string[]>
+  archivedIds: ReadonlySet<string>
+  /**
+   * Land (or focus) this plugin's history tab in the target session's sidebar.
+   * Threaded down from the panel because the backend is only reachable through
+   * the occurrence the panel holds.
+   */
+  openHistory: (sessionId: string) => void
+}) {
+  const { ctx, id, depth, store, sessionList, now, parentToChildren, archivedIds, openHistory } = props
+  const children = parentToChildren[id] ?? []
+  const isRoot = depth === 0
+  const hasChildren = children.length > 0
+  const collapsed = store.isCollapsed(id)
+
+  // Stale classification: archived (DSH-side archive, feed may still list it)
+  // or gone (deleted / not yet hydrated). Stale rows are non-navigable and
+  // offer a "移除" entry that prunes the whole subtree from the mapping.
+  const status = sessionStatus(id, sessionList.byId, archivedIds)
+  const stale = status !== 'live'
+
+  // The row's recent-activity time: the newest `updatedAt` across the whole
+  // subtree (a conversation group's "最近访问"), formatted like the left panel.
+  const updatedAt = subtreeLatestUpdatedAt(id, parentToChildren, sid => sessionList.byId[sid]?.updatedAt)
+  const time = updatedAt === undefined ? undefined : timeLabel(updatedAt, now)
+
+  return (
+    <div className={css.group}>
+      <div
+        role="treeitem"
+        aria-level={depth + 1}
+        aria-expanded={hasChildren ? !collapsed : undefined}
+        aria-disabled={stale || undefined}
+        className={`${isRoot ? css.mainRow : css.sideRow}${stale ? ` ${css.stale}` : ''}`}
+      >
+        <button
+          type="button"
+          className={stale ? `${css.rowOpen} ${css.rowOpenDisabled}` : css.rowOpen}
+          disabled={stale}
+          onClick={() => {
+            // One call, not two. The occurrence's open makes the target session
+            // visible itself (see `show-session.ts`) and then lands this plugin's
+            // history tab in its sidebar, so the user keeps the tree they were
+            // reading. An earlier revision ALSO called `ctx.sessions.open(id)`
+            // here — a member that does not exist — which threw a TypeError and
+            // killed the jump before the tab could ever open.
+            openHistory(id)
+          }}        >
+          {isRoot && <span className={css.dot} />}
+          <span className={isRoot ? css.mainLabel : css.sideLabel}>
+            {titleOf(ctx, id)}
+          </span>
+          {stale && (
+            <span className={css.staleBadge}>
+              {status === 'archived' ? t('histArchived') : t('histDeleted')}
+            </span>
+          )}
+        </button>
+        {time !== undefined && <span className={css.time}>{time}</span>}
+        {stale ? (
+          <button
+            type="button"
+            className={css.remove}
+            title={t('histRemoveTitle')}
+            onClick={() => { store.removeSession(id) }}
+          >
+            {t('commonRemove')}
+          </button>
+        ) : hasChildren ? (
+          <button
+            type="button"
+            className={css.collapse}
+            aria-label={collapsed ? t('histExpand') : t('histCollapse')}
+            aria-expanded={!collapsed}
+            onClick={() => { store.toggleCollapsed(id) }}
+          >
+            <Glyph icon={FoldArrow} className={collapsed ? css.arrow : `${css.arrow} ${css.arrowOpen}`} />
+          </button>
+        ) : (
+          <span className={css.collapseSpacer} aria-hidden="true" />
+        )}
+      </div>
+      {hasChildren && !collapsed && (
+        <div role="group" className={css.children}>
+          {children.map((childId) => (
+            <TreeNode
+              key={childId}
+              ctx={ctx}
+              id={childId}
+              depth={depth + 1}
+              store={store}
+              sessionList={sessionList}
+              now={now}
+              parentToChildren={parentToChildren}
+              archivedIds={archivedIds}
+              openHistory={openHistory}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Resolve a session's display title (fallback to the id). */
+function titleOf(ctx: Context, id: string): string {
+  try {
+    const summary = ctx.sessions.list.getSnapshot().byId[id]
+    if (summary?.displayTitle !== undefined && summary.displayTitle !== '') return summary.displayTitle
+    if (summary?.title !== undefined && summary.title !== '') return summary.title
+  } catch {
+    // fall through to the id
+  }
+  return id
+}
+
+/**
+ * Jump into a conversation from the 追问记录 tree. Switching the active
+ * conversation and landing this plugin's history tab in the target session's
+ * sidebar are both `sidebar-native.ts`'s job (see the row's click handler): it is
+ * the module that knows how the right column addresses a session.
+ */

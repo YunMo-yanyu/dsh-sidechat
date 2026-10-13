@@ -1,0 +1,496 @@
+/**
+ * The AskPanel's model selector: a compact port of the host composer's
+ * `conversation.input.model` seat (ModelSelect), driven directly by the same
+ * facts, so a switch here is what the host composer and the /model command
+ * show next. Two-level menu (模型 / 推理强度) over the provider-grouped
+ * directory; failures surface as an inline strip with Retry.
+ *
+ * The directory is assembled from TWO sources, exactly like the host's own
+ * ModelDirectory — the single `session.models` RPC that used to return both
+ * halves no longer exists:
+ * - `session.modelCatalog()` — the Host-generation advisory catalog (provider
+ *   groups, per-provider failures, routable routes, the deployment default).
+ *   It carries no session address: one load serves every seat.
+ * - the session's `modelSelection` projection — the durable current selection,
+ *   subscribed rather than polled, so a switch made in the host composer (or
+ *   by `trySelectModel` on a fresh follow-up) reaches this seat on its own.
+ */
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type FocusEvent } from 'react'
+import {
+  Tooltip,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import type { Context } from '../context-types.ts'
+import type {
+  SidechatModelCatalogFailure,
+  SidechatModelProviderGroup,
+  SidechatModelSelection,
+  SidechatSessionModels,
+} from '../context-types.ts'
+import { t } from './locales.ts'
+import { useLocaleRevision } from './use-locale.ts'
+import { useProjectionValue } from './use-projection.ts'
+import { iconOf } from './host-primitives.ts'
+import { Glyph } from './primitives.ts'
+import { modelSelectionOfProjection, remoteErrorText } from './session-wire.ts'
+import { effectiveEffortOf, isNoopSelection, modelChoiceId, modelChoicesOf, modelSelectionOf } from './model-menu.ts'
+import type { ModelSeatMode } from './model-seat.ts'
+import css from './ask-panel.module.css'
+
+/** Join truthy class names (no clsx dependency in this package). */
+function cx(...names: Array<string | false | null | undefined>): string {
+  return names.filter(Boolean).join(' ')
+}
+
+/*
+ * This seat's glyphs, resolved by NAME rather than imported: DSH renamed its
+ * whole icon set in 0.1.7 (size suffix → weight suffix, no aliases), so a named
+ * import of the old spelling is `undefined` at render time — and React renders
+ * `undefined` as "Element type is invalid" (error #130), which took this whole
+ * panel down through its containment boundary. `primitives.ts` owns the rule and
+ * the fallback chain; `undefined` means "this host has no such glyph" and
+ * {@link Glyph} then draws nothing.
+ */
+const ChevronDown = iconOf('IconChevronDownOutline', 14)
+const ChevronRight = iconOf('IconChevronRightOutline', 14)
+const Warning = iconOf('IconWarningOutline', 16)
+const Check = iconOf('IconCheckOutline', 16)
+
+/** One pane of the dropdown: the two-row root or one drilled-in list. */
+type Pane = 'root' | 'models' | 'effort'
+
+/** Local mirror of the catalog lifecycle (the component owns its load). */
+interface DirState {
+  /**
+   * The selection THIS seat last committed. The `modelSelection` projection
+   * settles a beat after the RPC returns, so the local value wins until it
+   * catches up; it is never the seat's only source of truth.
+   */
+  committed: SidechatModelSelection | null
+  /** Provider routes currently able to serve a request. */
+  routableProviders: readonly string[]
+  /** The deployment default: the current selection of a session that never picked one. */
+  fallback: SidechatModelSelection | null
+  /** Whether the catalog has landed at least once (routability is unknown before). */
+  loaded: boolean
+  groups: readonly SidechatModelProviderGroup[]
+  failures: readonly SidechatModelCatalogFailure[]
+  status: 'idle' | 'loading' | 'ready' | 'selecting' | 'error'
+  error: string | null
+}
+
+const IDLE: DirState = {
+  committed: null,
+  routableProviders: [],
+  fallback: null,
+  loaded: false,
+  groups: [],
+  failures: [],
+  status: 'idle',
+  error: null,
+}
+
+/** One dynamic effort row; undefined means preserve the provider default. */
+interface EffortChoice {
+  key: string
+  effort: string | undefined
+  label: string
+}
+
+export interface ModelSelectProps {
+  ctx: Context
+  /**
+   * The session whose model directory this selector READS — and, in `commit`
+   * mode only, writes. `draft` / `readonly` never write it (issue #10: a new
+   * ask used to rewrite the asked session's model before its follow-up existed).
+   */
+  sessionId: string
+  /** How a pick lands. Default `commit` — submit it to `sessionId`. */
+  mode?: ModelSeatMode
+  /** The selection to DISPLAY, overriding the directory's own current. */
+  value?: SidechatModelSelection | null
+  /** Hover hint (the read-only seat's explainer); absent leaves the tooltip off. */
+  hint?: string
+  disabled?: boolean
+  /**
+   * Called with the accepted selection: after a switch lands in `commit` mode,
+   * immediately in `draft` mode. Lets the owner record "the model the next ask
+   * should use".
+   */
+  onChange?: (selection: SidechatModelSelection) => void
+}
+
+/**
+ * The compact model seat for the side panel. `ctx.remote.session` carries both
+ * verbs (`modelCatalog` / `selectModel`) — the very namespace the host's own
+ * model surfaces submit through, so no plugin-to-plugin import is involved.
+ */
+export function ModelSelect({
+  ctx,
+  sessionId,
+  mode = 'commit',
+  value = null,
+  hint,
+  disabled = false,
+  onChange,
+}: ModelSelectProps) {
+  // The seat renders inside the panel root, but its own useMemo caches copy —
+  // the revision keys that memo so a language switch rebuilds the labels.
+  const localeRevision = useLocaleRevision()
+  const [dir, setDir] = useState<DirState>(IDLE)
+  const [open, setOpen] = useState(false)
+  const [pane, setPane] = useState<Pane>('root')
+  const generation = useRef(0)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const id = useId()
+
+  // The session's durable selection, live: the projection is published for
+  // EVERY listed session, so this also reads for a follow-up that is never
+  // opened on screen.
+  const projected = useProjectionValue(ctx, sessionId, 'modelSelection')
+
+  /** The advisory directory the pure menu helpers consume (catalog + projection). */
+  const dirView: SidechatSessionModels = useMemo(() => {
+    const current = dir.committed ?? modelSelectionOfProjection(projected) ?? dir.fallback
+    return {
+      current,
+      routable: !dir.loaded || current === null
+        ? null
+        : dir.routableProviders.includes(current.provider),
+      groups: dir.groups,
+      failures: dir.failures,
+    }
+  }, [dir, projected])
+
+  const choices = useMemo(() => modelChoicesOf(dirView), [dirView])
+  // What the seat DISPLAYS. `dirView.current` is wire truth (the session's own
+  // reported model); a draft overrides it so the seat shows what the follow-up
+  // will actually use, without anything being written anywhere.
+  const selection: SidechatModelSelection | null = mode === 'commit' ? dirView.current : (value ?? dirView.current)
+  const selectedIndex = selection === null
+    ? -1
+    : choices.findIndex(c => c.provider === selection.provider && c.model === selection.model)
+  const currentChoice = choices[selectedIndex]
+  const reasoning = currentChoice?.reasoning
+  const effectiveEffort = effectiveEffortOf(dirView, selection)
+  const effortLabel = reasoning === undefined
+    ? undefined
+    : effectiveEffort === undefined
+      ? t('commonDefault')
+      : reasoning.efforts.find(level => level.id === effectiveEffort)?.name ?? effectiveEffort
+  const effortChoices = useMemo<readonly EffortChoice[]>(() => reasoning === undefined
+    ? []
+    : [
+      ...reasoning.defaultEffort === undefined
+        ? [{ key: 'provider-default', effort: undefined as string | undefined, label: t('modelProviderDefault') }]
+        : [],
+      ...reasoning.efforts.map((effort) => ({
+        key: `effort:${effort.id}`,
+        effort: effort.id,
+        label: effort.name,
+      })),
+    ], [reasoning, localeRevision])
+  const busy = dir.status === 'selecting'
+
+  const load = (): void => {
+    const gen = ++generation.current
+    setDir(prev => ({ ...prev, status: 'loading', error: null }))
+    // The catalog is Host-generation state, not session state: no address, and
+    // the current selection rides the projection instead of this response.
+    void ctx.remote.session.modelCatalog().then((result) => {
+      if (gen !== generation.current) return
+      if (!result.ok) {
+        // Bind the failure before the closure: narrowing on `result` (a const)
+        // survives into the setDir callback, a re-read of `result.ok` would not.
+        const detail = remoteErrorText(result.error)
+        setDir(prev => ({ ...prev, status: 'error', error: detail }))
+        return
+      }
+      const { default: fallback, routableProviders, groups, failures } = result.value
+      setDir(prev => ({
+        ...prev,
+        fallback,
+        routableProviders,
+        loaded: true,
+        groups,
+        failures,
+        status: 'ready',
+        error: null,
+      }))
+    }).catch((error: unknown) => {
+      if (gen !== generation.current) return
+      setDir(prev => ({ ...prev, status: 'error', error: error instanceof Error ? error.message : String(error) }))
+    })
+  }
+
+  // Mount-time load resolves the trigger label; every open refreshes.
+  useEffect(() => { load() }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!open) return
+    const closeOutside = (event: MouseEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', closeOutside)
+    return () => { document.removeEventListener('mousedown', closeOutside) }
+  }, [open])
+
+  const show = (): void => {
+    setPane('root')
+    setOpen(true)
+    load()
+  }
+  const close = (restoreFocus = false): void => {
+    setOpen(false)
+    setPane('root')
+    if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
+  }
+
+  const moveFocus = (offset: number): void => {
+    const items = itemRefs.current.filter(item => item !== null)
+    if (items.length === 0) return
+    const active = items.findIndex(item => item === document.activeElement)
+    const next = (Math.max(active, 0) + offset + items.length) % items.length
+    items[next]?.focus()
+  }
+
+  const onRootKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      if (pane !== 'root') setPane('root')
+      else close(true)
+      return
+    }
+    if (!open) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      moveFocus(event.key === 'ArrowDown' ? 1 : -1)
+    }
+  }
+
+  const onBlur = (event: FocusEvent<HTMLDivElement>): void => {
+    if (event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget)) return
+    close()
+  }
+
+  const choose = (next: SidechatModelSelection): void => {
+    // A read-only seat (the `inherit` fork keeps the parent's model) never picks.
+    if (mode === 'readonly') {
+      close(true)
+      return
+    }
+    // A draft is local: the pick travels to the follow-up as `modelOverride`
+    // once it exists. No RPC, so the asked session is left untouched. No no-op
+    // short-circuit either — re-picking the displayed model is how the user
+    // pins a config-derived default as an explicit draft.
+    if (mode === 'draft') {
+      onChange?.(next)
+      close(true)
+      return
+    }
+    // Same route AND same effective effort is the only true no-op. The earlier
+    // guard compared provider/model only, which swallowed every effort switch.
+    if (isNoopSelection(dirView, selection, next)) {
+      close(true)
+      return
+    }
+    const gen = ++generation.current
+    setDir(prev => ({ ...prev, status: 'selecting', error: null }))
+    void ctx.remote.session.selectModel({
+      sessionId,
+      provider: next.provider,
+      model: next.model,
+      ...next.reasoningEffort === undefined ? {} : { reasoningEffort: next.reasoningEffort },
+    }).then((result) => {
+      if (gen !== generation.current) return
+      if (!result.ok) {
+        const detail = remoteErrorText(result.error)
+        setDir(prev => ({ ...prev, status: 'error', error: detail }))
+        return
+      }
+      // Hold the accepted selection locally until the projection settles on it.
+      const { selected } = result.value
+      setDir(prev => ({ ...prev, committed: selected, status: 'ready', error: null }))
+      onChange?.(selected)
+      close(true)
+    }).catch((error: unknown) => {
+      if (gen !== generation.current) return
+      setDir(prev => ({ ...prev, status: 'error', error: error instanceof Error ? error.message : String(error) }))
+    })
+  }
+
+  // An effort-only pick keeps the route, so it MUST go through the same guard
+  // as a model pick — `isNoopSelection` folds in the model's default effort and
+  // is the single place that decides whether anything changed.
+  const chooseEffort = (effort: string | undefined): void => {
+    if (selection === null) return
+    choose({
+      provider: selection.provider,
+      model: selection.model,
+      ...effort === undefined ? {} : { reasoningEffort: effort },
+    })
+  }
+
+  // Fall back to the raw model id while the directory loads, after a failed
+  // load, or for a drafted model the catalog does not list — a bare 「模型」
+  // would hide which model the ask is actually going to use.
+  const modelLabel = currentChoice?.name ?? selection?.model ?? t('modelFallbackLabel')
+  const triggerLabel = effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`
+  const readonly = mode === 'readonly'
+  itemRefs.current = []
+  let itemIndex = 0
+  const itemRef = () => {
+    const at = itemIndex++
+    return (node: HTMLButtonElement | null) => { itemRefs.current[at] = node }
+  }
+
+  // The read-only seat uses `aria-disabled`, never the native `disabled`
+  // attribute: browsers dispatch no pointer events on a disabled control (and
+  // do not bubble them), which would silence the very hint that explains why
+  // the seat cannot be used.
+  const root = (
+    <div ref={rootRef} className={css.modelRoot} onKeyDown={onRootKeyDown} onBlur={onBlur}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={cx(css.chip, readonly && css.chipReadonly)}
+        aria-label={t('modelTrigger', { label: triggerLabel })}
+        aria-haspopup={readonly ? undefined : 'menu'}
+        aria-expanded={readonly ? undefined : open}
+        aria-controls={open ? `${id}-menu` : undefined}
+        aria-disabled={readonly ? true : undefined}
+        title={hint === undefined ? triggerLabel : undefined}
+        disabled={disabled}
+        onClick={() => { if (readonly) return; if (open) close(); else show() }}
+      >
+        <span className={css.chipLabel}>{modelLabel}</span>
+        {effortLabel !== undefined && <span className={css.chipEffort}>{effortLabel}</span>}
+        <span className={cx(css.chipChevron, open && css.chipChevronOpen)} aria-hidden>
+          <Glyph icon={ChevronDown} />
+        </span>
+      </button>
+
+      {open && (
+        <div id={`${id}-menu`} className={css.modelMenu} role="menu" aria-label={t('modelMenuLabel')} aria-busy={busy || dir.status === 'loading'}>
+          {pane === 'root' && (
+            <>
+              <button ref={itemRef()} type="button" role="menuitem" className={css.modelCell} onClick={() => { setPane('models') }}>
+                <span className={css.modelCellLabel}>{t('modelCellModel')}</span>
+                <span className={css.modelCellValue}>{modelLabel}</span>
+                <Glyph icon={ChevronRight} className={css.modelCellChevron} />
+              </button>
+              {reasoning !== undefined && (
+                <button ref={itemRef()} type="button" role="menuitem" className={css.modelCell} onClick={() => { setPane('effort') }}>
+                  <span className={css.modelCellLabel}>{t('modelCellEffort')}</span>
+                  <span className={css.modelCellValue}>{effortLabel}</span>
+                  <Glyph icon={ChevronRight} className={css.modelCellChevron} />
+                </button>
+              )}
+            </>
+          )}
+
+          {pane === 'models' && (
+            <>
+              {dir.status === 'loading' && <div className={css.modelStatus}>{t('commonLoading')}</div>}
+              {dir.error !== null && (
+                <div className={css.modelError}>
+                  <Glyph icon={Warning} />
+                  <span>{t('errModelFailed', { detail: dir.error })}</span>
+                  <button type="button" className={css.modelRetry} onClick={load}>{t('commonRetry')}</button>
+                </div>
+              )}
+              {dir.failures.map(failure => (
+                <div className={css.modelWarn} key={failure.id}>
+                  <Glyph icon={Warning} />
+                  <span>{t('modelFailureDetail', { name: failure.name, message: failure.message ?? t('modelLoadFailed') })}</span>
+                  <button type="button" className={css.modelRetry} onClick={load}>{t('commonRetry')}</button>
+                </div>
+              ))}
+              <div className={css.modelGroups}>
+                {dir.groups.map((group) => {
+                  const headingId = `${id}-${group.id}`
+                  return (
+                    <section role="group" aria-labelledby={headingId} className={css.modelGroup} key={group.id}>
+                      <div className={css.modelGroupTitle} id={headingId}>{group.name}</div>
+                      {group.models.map((model) => {
+                        const selected = selection?.provider === group.id && selection.model === model.id
+                        return (
+                          <button
+                            ref={itemRef()}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={selected}
+                            className={cx(css.modelOption, selected && css.modelOptionSelected)}
+                            key={model.id}
+                            title={model.name}
+                            disabled={busy}
+                            onClick={() => {
+                              // Resolve against the DISPLAYED selection: picking
+                              // the drafted route must carry its own effort
+                              // forward, not the read session's.
+                              const picked = modelSelectionOf({ ...dirView, current: selection }, modelChoiceId(group.id, model.id))
+                              if (picked !== undefined) choose(picked)
+                            }}
+                          >
+                            <span className={css.modelOptionCopy}>
+                              <span className={css.modelName}>{model.name}</span>
+                              {model.description !== undefined && model.description !== '' && (
+                                <span className={css.modelDesc}>{model.description}</span>
+                              )}
+                            </span>
+                            <span className={css.modelCheck}>
+                              {selected ? <Glyph icon={Check} /> : null}
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </section>
+                  )
+                })}
+              </div>
+              {dir.status === 'ready' && choices.length === 0 && (
+                <div className={css.modelStatus}>{t('modelEmpty')}</div>
+              )}
+            </>
+          )}
+
+          {pane === 'effort' && (
+            <>
+              {effortChoices.length === 0
+                ? <div className={css.modelStatus}>{t('modelNoEfforts')}</div>
+                : effortChoices.map(level => (
+                  <button
+                    ref={itemRef()}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={effectiveEffort === level.effort}
+                    className={cx(css.modelOption, effectiveEffort === level.effort && css.modelOptionSelected)}
+                    key={level.key}
+                    disabled={busy}
+                    onClick={() => { chooseEffort(level.effort) }}
+                  >
+                    <span className={css.modelOptionCopy}>
+                      <span className={css.modelName}>{level.label}</span>
+                    </span>
+                    <span className={css.modelCheck}>
+                      {effectiveEffort === level.effort ? <Glyph icon={Check} /> : null}
+                    </span>
+                  </button>
+                ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+
+  // Tooltip clones its anchor (no extra DOM, the div's own ref and onBlur are
+  // forwarded), and its `disabled` prop keeps the anchor mounted when there is
+  // no hint — so toggling the strategy never remounts the seat.
+  return (
+    <Tooltip label={hint ?? ''} side="top" delayMs={300} disabled={hint === undefined}>
+      {root}
+    </Tooltip>
+  )
+}

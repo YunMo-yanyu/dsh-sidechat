@@ -1,0 +1,16 @@
+{
+  "id": "dsh-external/dsh-sidechat",
+  "version": "1.3.0",
+  "main": "./lib/index.js",
+  "description": "DeepSeek Harness 原生风格的只读侧边临时会话；支持文件解答，关闭标签后清除本地记录。",
+  "engines": {
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "contributes": {
+    "tools": [],
+    "skills": []
+  },
+  "client": {
+    "main": "./lib/client-registry.js"
+  }
+}

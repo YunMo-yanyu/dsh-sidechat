@@ -1,0 +1,10 @@
+.panel { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }
+.notice { flex: none; padding: 10px 16px; color: var(--dsw-alias-label-secondary); font-size: 12px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.status { padding: 20px 16px; color: var(--dsw-alias-label-secondary); font-size: 14px; }
+.views { display: flex; flex: 1 0 auto; flex-direction: column; min-height: 0; }
+.panel [data-conversation-content] { flex: 1; min-height: 0; }
+.panel [data-slot="conversation.input.permission"],
+.panel [data-slot="conversation.input.plan"] { display: none !important; }
+
+:global([data-row-key^="session:session-sidechat-temp-"]),
+:global([data-row-key^="session:session-sidebarqa-temp-"]) { display: none !important; }
