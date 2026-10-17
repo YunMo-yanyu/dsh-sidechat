@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sidechat temporary conversations",
+    "description": "Read-only temporary side conversations with the native Harness interface, file reading and search, and local cleanup when the follow-up tab closes."
+  }
+}

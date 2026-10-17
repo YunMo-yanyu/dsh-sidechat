@@ -26,7 +26,7 @@ import { iconIn, type IconComponent, type IconLegacySize, type PrimitiveModule }
  * The running host's primitive namespace.
  *
  * The cast is the point: the installed type stub describes ONE generation of the
- * host (currently the pre-rename `0.1.6-alpha.2`), while this namespace is
+ * host (currently `0.2.1-rc.2`), while this namespace is
  * whichever generation is actually deployed. Every read goes through
  * {@link iconIn}, which verifies the value is renderable instead of trusting a
  * name.

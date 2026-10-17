@@ -15,13 +15,13 @@ Temporary side conversations for DeepSeek Harness, using the same interface as t
 
 ## Installation
 
-Current version: **1.3.1**. Verified with the Web interface of DeepSeek Harness **0.2.0-rc.2**, on Node.js **20 or later**.
+Current version: **1.3.2**. Verified with the Web interface of DeepSeek Harness **0.2.1-rc.2**, on Node.js **20 or later**.
 
-1. Download `dsh-sidechat-1.3.1.tgz` from [Releases](https://github.com/YunMo-yanyu/dsh-sidechat/releases/latest).
+1. Download `dsh-sidechat-1.3.2.tgz` from [Releases](https://github.com/YunMo-yanyu/dsh-sidechat/releases/latest).
 2. Install it into the Web profile:
 
    ```sh
-   dsh plugin --profile web add /path/to/dsh-sidechat-1.3.1.tgz
+   dsh plugin --profile web add /path/to/dsh-sidechat-1.3.2.tgz
    ```
 
 3. Restart Harness and refresh the browser.

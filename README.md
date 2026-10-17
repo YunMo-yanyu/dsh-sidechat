@@ -1,4 +1,4 @@
-# Sidechat for DeepSeek Harness
+# Sidechat：DeepSeek Harness 侧边临时会话
 
 [English](README_EN.md)
 
@@ -15,13 +15,13 @@
 
 ## 安装
 
-当前版本：**1.3.1**。已验证环境：DeepSeek Harness **0.2.0-rc.2** 的 Web 界面，Node.js **20 或以上**。
+当前版本：**1.3.2**。已验证环境：DeepSeek Harness **0.2.1-rc.2** 的 Web 界面，Node.js **20 或以上**。
 
-1. 从 [Releases](https://github.com/YunMo-yanyu/dsh-sidechat/releases/latest) 下载 `dsh-sidechat-1.3.1.tgz`。
+1. 从 [Releases](https://github.com/YunMo-yanyu/dsh-sidechat/releases/latest) 下载 `dsh-sidechat-1.3.2.tgz`。
 2. 安装到 Web profile：
 
    ```sh
-   dsh plugin --profile web add /path/to/dsh-sidechat-1.3.1.tgz
+   dsh plugin --profile web add /path/to/dsh-sidechat-1.3.2.tgz
    ```
 
 3. 重启 Harness，并刷新浏览器。
@@ -55,6 +55,8 @@ pnpm test
 pnpm build
 pnpm pack
 ```
+
+维护宿主兼容性时，可将 `DSH_INSTALL_ROOT` 设为 Harness 包的绝对路径后运行 `pnpm test`，同时检查真实宿主的兼容性门禁、插件展示信息和配置引用接口。
 
 工具执行限制和文件只读策略共同约束模型操作。第三方插件在宿主中运行的受信任代码不属于操作系统级隔离范围。
 

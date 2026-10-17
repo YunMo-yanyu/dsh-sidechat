@@ -1,5 +1,5 @@
 import { sidechatApi } from './api.ts'
-import { currentModelOf } from './session-wire.ts'
+import { currentModelOf, mintRequestId } from './session-wire.ts'
 import type { Context } from '../context-types.ts'
 
 export interface TemporaryState { phase: 'loading' | 'ready' | 'error' | 'closed'; sessionId?: string; reference?: any; error?: string }
@@ -13,7 +13,7 @@ export function createTemporaryController(ctx: Context) {
     forTab(parentSessionId: string, signal: AbortSignal) {
       const existing = entries.get(signal)
       if (existing) return existing
-      const key = crypto.randomUUID()
+      const key = mintRequestId()
       let state: TemporaryState = { phase: 'loading' }
       let reference: any
       const listeners = new Set<() => void>()

@@ -47,7 +47,7 @@ describe('temporary read-only capability enforcement', () => {
   it('denies mutating tools even if a plugin registers them in the exempt own layer', async () => {
     const f = fixture()
     installTemporaryReadOnly(f.scope, f.agent)
-    for (const name of ['write', 'edit', 'delete', 'bash', 'run_code', 'delegate', 'mcp_delete']) {
+    for (const name of ['write', 'edit', 'delete', 'bash', 'run_code', 'delegate', 'mcp_delete', 'working_directory']) {
       const execute = vi.fn(async () => 'modified')
       f.own.set(name, { name, execute })
       await expect(f.execute(name)).rejects.toThrow('read-only')
