@@ -5,9 +5,10 @@ import type { Context } from '../context-types.ts'
 export interface TemporaryState { phase: 'loading' | 'ready' | 'error' | 'closed'; sessionId?: string; reference?: any; error?: string }
 export function createTemporaryController(ctx: Context) {
   const active = new Set<() => void>()
+  let disposed = false
   const onPageHide = () => { active.forEach(close => close()) }
   window.addEventListener('pagehide', onPageHide)
-  ctx.effect(() => () => { window.removeEventListener('pagehide', onPageHide); onPageHide() }, 'sidechat: temporary page lifetime')
+  ctx.effect(() => () => { disposed = true; window.removeEventListener('pagehide', onPageHide); onPageHide() }, 'sidechat: temporary page lifetime')
   const entries = new WeakMap<AbortSignal, { getSnapshot(): TemporaryState; subscribe(fn: () => void): () => void }>()
   return {
     forTab(parentSessionId: string, signal: AbortSignal) {
@@ -32,7 +33,7 @@ export function createTemporaryController(ctx: Context) {
             localStorage.removeItem(`dsh.conversation.${sessionId}`)
             localStorage.removeItem(`dsh.sidebarRight.${sessionId}`)
           }
-          void (ctx.sessions as any).refresh()
+          if (!disposed) void (ctx.sessions as any).refresh()
         }).catch(error => console.error('[sidechat] temporary cleanup failed:', error))
       }
       active.add(close)
@@ -44,21 +45,23 @@ export function createTemporaryController(ctx: Context) {
         try {
           const model = currentModelOf(ctx, parentSessionId)
           const created = await sidechatApi.temporaryOpen({ key, parentSessionId, model })
+          if (isClosed) { await sidechatApi.temporaryClose(key); return }
           // Standard web routing installs its own selection reference. Commit the
           // captured main selection before rendering to defeat a changed global default.
-          if (model && !signal.aborted) {
+          if (model && !isClosed) {
             const selected = await ctx.remote.session.selectModel({ sessionId: created.sessionId, ...model })
             if (!selected.ok) throw new Error(selected.error.message)
           }
-          if (signal.aborted) { await sidechatApi.temporaryClose(key); return }
+          if (isClosed) { await sidechatApi.temporaryClose(key); return }
           await (ctx.sessions as any).refresh()
+          if (isClosed) { await sidechatApi.temporaryClose(key); return }
           reference = (ctx.sessions as any).retain(created.sessionId, { source: 'sidechat-temporary' })
           await reference.ready
-          if (signal.aborted) { reference.release(); await sidechatApi.temporaryClose(key); return }
+          if (isClosed) { reference.release(); await sidechatApi.temporaryClose(key); return }
           publish({ phase: 'ready', sessionId: created.sessionId, reference })
         } catch (error) {
           await sidechatApi.temporaryClose(key).catch(console.error)
-          if (!signal.aborted) publish({ phase: 'error', error: error instanceof Error ? error.message : String(error) })
+          if (!isClosed) publish({ phase: 'error', error: error instanceof Error ? error.message : String(error) })
         }
       })()
       return store

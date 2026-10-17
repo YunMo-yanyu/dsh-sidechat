@@ -28,4 +28,25 @@ describe('temporary conversations over plain HTTP', () => {
     expect(sidechatApi.temporaryClose).toHaveBeenCalledWith('03030303-0303-4303-8303-030303030303')
     cleanups.forEach(cleanup => cleanup())
   })
+
+  it('finishes pending opens after hot unload without touching inactive services', async () => {
+    vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
+    let finish!: (value: { sessionId: string }) => void
+    vi.mocked(sidechatApi.temporaryOpen).mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    let cleanup!: () => void
+    let inactive = false
+    const sessions = { scope: () => undefined, refresh: vi.fn() }
+    const ctx = {
+      get sessions() { if (inactive) throw new Error('inactive context'); return sessions },
+      effect: (fn: () => () => void) => { cleanup = fn() },
+    } as unknown as Context
+    const controller = createTemporaryController(ctx)
+    const entry = controller.forTab('main-session', new AbortController().signal)
+    cleanup()
+    inactive = true
+    finish({ sessionId: 'temporary' })
+    await vi.waitFor(() => expect(sidechatApi.temporaryClose).toHaveBeenCalledTimes(2))
+    expect(entry.getSnapshot().phase).toBe('closed')
+    expect(sessions.refresh).not.toHaveBeenCalled()
+  })
 })
