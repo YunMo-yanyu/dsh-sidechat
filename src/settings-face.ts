@@ -1,32 +1,4 @@
-/**
- * The capability probe for DSH's settings seam — the ONLY place that decides
- * which settings API shape this host offers.
- *
- * The seam changed under us without a rename: `dsh-settings@0.1.5-rc.2` (npm
- * `latest`) ships `SettingsProvider` with a public
- * `register(ns, schema, options)`; from `dsh-settings@0.1.7-alpha.1` the service
- * is `SettingsForms`, which has **no `register`** at all — a plugin's editable
- * fields are derived from its own exported `Config` schema (fields marked
- * volatile), and `describe` / `update` address **profile entry ids** rather than
- * a plugin-declared namespace. There is no compatibility entry point, so an
- * unguarded `register` call on a 0.1.7 host throws a `TypeError` on EVERY launch
- * (issue #19) — caught by the caller, so it degraded instead of crashing, but it
- * logged a failure line and left the namespace unregistered.
- *
- * Probe by STRUCTURE, never by version — the same rule the client half follows
- * for `sidebarRightTabs` / `slots` / `uiWorkspace`. `typeof … === 'function'`
- * covers both shapes, and it stays honest on a host that keeps the service name
- * while dropping a method (the failure mode a version comparison would miss).
- *
- * When `register` is absent this returns a typed refusal rather than throwing:
- * the caller logs one informational line, the plugin keeps running on
- * {@link SIDECHAT_DEFAULTS}, and the config routes answer with an accurate
- * refusal instead of a bogus one.
- *
- * A future migration that keeps the settings page alive on 0.1.7+ (declare a
- * volatile `Config`, then address the form by entry id) would land here; the
- * guard is what makes that additive instead of a behavior cliff.
- */
+/** Revision-guarded settings access for legacy namespaces and current profile forms. */
 import type { SidechatSettingsScope, SidechatSettingsService } from './context-types.ts'
 
 /** One namespace view: the resolved value plus the revision it was read at. */
@@ -45,8 +17,7 @@ export interface SidechatConfigFace {
  * Why the namespace is unavailable.
  * - `service-missing`: no `ctx.settings` at all (the caller's `inject` callback
  *   does not run in that deployment, so this is the defensive branch).
- * - `no-register`: the service is mounted but exposes no namespace registration
- *   (`dsh-settings` ≥ 0.1.7). Expected on a new host — not an error.
+ * - `no-register`: neither supported settings API is available.
  * - `register-failed`: registration itself refused (duplicate namespace, schema
  *   clash, a provider that throws). Genuinely unexpected: worth a warning.
  */
@@ -54,7 +25,7 @@ export type SidechatSettingsSeamReason = 'service-missing' | 'no-register' | 're
 
 /** The probe result: an opened scope plus its face, or why there is none. */
 export type SidechatSettingsSeam<T> =
-  | { ok: true; scope: SidechatSettingsScope<T>; face: SidechatConfigFace }
+  | { ok: true; scope: Pick<SidechatSettingsScope<T>, 'get'>; face: SidechatConfigFace }
   | { ok: false; reason: SidechatSettingsSeamReason; error?: unknown }
 
 /**
@@ -67,15 +38,21 @@ export type SidechatSettingsSeam<T> =
  * @param ns - the namespace this face reads and writes.
  * @returns the revision-guarded face.
  */
-function faceOf(service: Partial<SidechatSettingsService>, ns: string): SidechatConfigFace {
+function faceOf(service: Partial<SidechatSettingsService>, namespace: string | (() => string | undefined)): SidechatConfigFace {
   const describe = typeof service.describe === 'function' ? service.describe.bind(service) : undefined
   const update = typeof service.update === 'function' ? service.update.bind(service) : undefined
   const empty: SidechatConfigView = { value: undefined, revision: undefined }
+  const namespaceOf = (): string => {
+    const ns = typeof namespace === 'function' ? namespace() : namespace
+    if (!ns) throw new Error('Sidechat has no owning profile entry for settings')
+    return ns
+  }
   const viewOf = (): SidechatConfigView => {
     if (describe === undefined) return empty
     const listed: unknown = describe({ redactSecrets: true })
     if (!Array.isArray(listed)) return empty
-    const descriptor = listed.find(candidate => (candidate as { ns?: unknown }).ns === ns)
+    const ns = namespaceOf()
+    const descriptor = listed.find(candidate => (candidate as { ns?: unknown } | null)?.ns === ns)
     return descriptor === undefined
       ? empty
       : {
@@ -89,7 +66,7 @@ function faceOf(service: Partial<SidechatSettingsService>, ns: string): Sidechat
       if (update === undefined) {
         throw new Error('this host exposes no settings.update for a registered namespace')
       }
-      await update(ns, patch, expectedRevision)
+      await update(namespaceOf(), patch, expectedRevision)
       return viewOf()
     },
   }
@@ -102,10 +79,16 @@ function faceOf(service: Partial<SidechatSettingsService>, ns: string): Sidechat
  * @param schema - the namespace schema (schemastery).
  * @returns the opened scope + face, or a typed refusal that never throws.
  */
-export function openSettingsSeam<T>(service: unknown, ns: string, schema: unknown): SidechatSettingsSeam<T> {
+export function openSettingsSeam<T>(service: unknown, ns: string, schema: unknown, entryId?: () => string | undefined): SidechatSettingsSeam<T> {
   if (service === null || service === undefined) return { ok: false, reason: 'service-missing' }
   const probe = service as Partial<SidechatSettingsService>
-  if (typeof probe.register !== 'function') return { ok: false, reason: 'no-register' }
+  if (typeof probe.register !== 'function') {
+    if (typeof probe.describe !== 'function' || typeof probe.update !== 'function' || entryId === undefined) {
+      return { ok: false, reason: 'no-register' }
+    }
+    const face = faceOf(probe, entryId)
+    return { ok: true, face, scope: { get: () => face.get().value as T } }
+  }
   try {
     const scope = probe.register<T>(ns, schema)
     return { ok: true, scope, face: faceOf(probe, ns) }

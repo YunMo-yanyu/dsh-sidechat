@@ -35,6 +35,8 @@ import { createSidechatStore, type SidechatStore } from './store.ts'
 import { resolveCurrentSessionId } from './current-session.ts'
 import type { PendingQuote } from './store.ts'
 import { installSidebarTabs, type SidebarTab } from './sidebar-native.ts'
+import { installSettingsSection } from './settings-slot.ts'
+import { ConfigSection } from './settings-section.tsx'
 
 /**
  * Services required before mounting. `remote` is the typed client RPC service
@@ -159,7 +161,7 @@ export function apply(ctx: Context): void {
   // ── Settings page ─────────────────────────────────────────────────────────
   // The config panel lives in DSH's own settings as a section. Independent of the
   // sidebar (and of whether the sidebar exists at all), so it is installed on its own.
-
+  installSettingsSection(ctx, { label: () => t('cfgNavLabel'), component: ConfigSection })
 
   // Capture a selection → park the quote → open the ask tab. The quote goes on
   // the OPEN (not only into the store) because an external plugin may also open

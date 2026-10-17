@@ -185,7 +185,7 @@ export default [
     clean: false,
     // Bundle schemastery into the host artifact so the plugin never depends on
     // a runtime resolution of the (possibly diverged) schemastery instance.
-    noExternal: ['schemastery'],
+    noExternal: ['@deepseek-ai/schemastery', '@deepseek-ai/cosmokit'],
   },
   // Official profile channel: bundle id = package name (package.json `name`).
   clientBundle('dsh-sidechat', 'client.js'),

@@ -27,6 +27,7 @@ import {
   SIDECHAT_SETTINGS_NS,
   SidechatPrefsSchema,
   type SidechatConfig,
+  type SidechatLiveConfig,
   type SidechatHistoryStrategy,
 } from './config.ts'
 import {
@@ -58,7 +59,7 @@ import type {
   SidechatSettingsScope,
 } from './context-types.ts'
 
-export { SIDECHAT_DEFAULTS, SIDECHAT_SETTINGS_NS } from './config.ts'
+export { Config, SIDECHAT_DEFAULTS, SIDECHAT_SETTINGS_NS } from './config.ts'
 export type { SidechatConfig, SidechatHistoryStrategy, SidechatReasoningEffort } from './config.ts'
 export type { Context } from './context-types.ts'
 export { PROMPTS, promptLocaleOf, promptsOf, QUESTION_LABELS } from './prompt-locale.ts'
@@ -197,7 +198,7 @@ function buildApi(
       if (face === undefined) {
         throw new SidechatError(
           'settings-rejected',
-          'this host exposes no sidechat settings namespace (the settings service is absent, or it offers no namespace registration)',
+          'this host exposes no supported Sidechat settings API',
           503,
         )
       }
@@ -357,7 +358,7 @@ function buildApi(
  * Plugin body: mount the fenced route and the optional settings namespace.
  * @param ctx - host plugin context (webServer, sessionQuery, llm, loader).
  */
-export function apply(ctx: Context, entryConfig?: Partial<SidechatConfig>): void {
+export function apply(ctx: Context, entryConfig?: Partial<SidechatConfig> | SidechatLiveConfig): void {
   // A refusal, never a hang: the fence runs outside the route's try/catch, so
   // anything thrown in here would leave the response unwritten and the request
   // pending forever. Deny instead — the safe direction for a trust check.
@@ -371,32 +372,19 @@ export function apply(ctx: Context, entryConfig?: Partial<SidechatConfig>): void
   }
 
   // ── User-editable configuration ───────────────────────────────────────────
-  // The `sidechat` namespace is OPTIONAL and the host may not offer one at all:
-  // `dsh-settings` ≥ 0.1.7 dropped namespace registration (its `SettingsForms`
-  // derives editable fields from the plugin's own `Config` schema, addressed by
-  // profile entry id — see `settings-face.ts`). So the seam is probed by
-  // STRUCTURE, never by version, and every refusal degrades: the summarize route
-  // still answers on SIDECHAT_DEFAULTS. A refusal must never disable the plugin.
-  // The config face adds a revision-guarded update path so the webview config
-  // panel persists edits without silently overwriting a concurrent change
-  // (mirror of the settings seam's own guard).
-  let configScope: SidechatSettingsScope<SidechatConfig> | undefined
+  const owner = (ctx as unknown as { fiber?: { entry?: { options: { id: string } } } }).fiber
+  let configScope: Pick<SidechatSettingsScope<SidechatConfig>, 'get'> | undefined
   let configFace: SidechatConfigFace | undefined
   ctx.inject(['settings'], (sctx) => {
     const seam = openSettingsSeam<SidechatConfig>(
       sctx.settings as unknown,
       SIDECHAT_SETTINGS_NS,
       SidechatPrefsSchema,
+      () => owner?.entry?.options.id,
     )
     if (!seam.ok) {
-      // `service-missing` cannot happen here (cordis only runs this callback
-      // once `settings` is provided) — it stays silent. `no-register` is the
-      // EXPECTED shape on a 0.1.7+ host, so it is one informational line, not a
-      // failure. Only a genuinely unexpected refusal gets a warning.
       if (seam.reason === 'no-register') {
-        console.info(
-          '[dsh-sidechat] this host offers no settings namespace registration (dsh-settings ≥ 0.1.7 derives editable fields from the plugin Config instead); the sidechat namespace is skipped and defaults are used',
-        )
+        console.warn('[dsh-sidechat] this host exposes no supported settings API; keeping profile configuration')
       } else if (seam.reason === 'register-failed') {
         console.warn('[dsh-sidechat] settings registration failed; using defaults:', seam.error)
       }
@@ -404,12 +392,17 @@ export function apply(ctx: Context, entryConfig?: Partial<SidechatConfig>): void
     }
     configScope = seam.scope
     configFace = seam.face
+    if (typeof sctx.settings.configure === 'function') {
+      sctx.effect(() => sctx.settings.configure!({ auto: false }, owner), 'sidechat: custom settings page')
+    }
   })
+  const profileConfig = (): Partial<SidechatConfig> =>
+    entryConfig && 'get' in entryConfig ? entryConfig.get() ?? {} : entryConfig ?? {}
   const getConfig = (): SidechatConfig => {
     try {
-      return { ...SIDECHAT_DEFAULTS, ...entryConfig, ...configScope?.get() }
+      return { ...SIDECHAT_DEFAULTS, ...profileConfig(), ...configScope?.get() }
     } catch {
-      return SIDECHAT_DEFAULTS
+      return { ...SIDECHAT_DEFAULTS, ...profileConfig() }
     }
   }
 

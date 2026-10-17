@@ -150,6 +150,57 @@ describe('openSettingsSeam — the provider path', () => {
   })
 })
 
+describe('current profile forms', () => {
+  it('reads and writes the owning entry instead of the historical namespace', async () => {
+    let value = { answerModel: 'original' }
+    let revision = 4
+    const update = vi.fn(async (ns: string, patch: object, expected?: number) => {
+      expect(ns).toBe('custom-sidechat')
+      if (expected !== revision) throw Object.assign(new Error('stale form'), { code: 'SETTINGS_CONFLICT' })
+      value = { ...value, ...patch }
+      revision++
+    })
+    const service = {
+      ...formsLike(), update,
+      describe: () => [
+        { ns: NS, value: { answerModel: 'another-instance' }, revision: 99 },
+        { ns: 'custom-sidechat', value, revision },
+      ],
+    }
+    const seam = openSettingsSeam(service, NS, SCHEMA, () => 'custom-sidechat')
+    if (!seam.ok) throw new Error(seam.reason)
+    expect(seam.face.get()).toEqual({ value, revision: 4 })
+    await expect(seam.face.update({ answerModel: 'changed' }, 4)).resolves.toEqual({ value: { answerModel: 'changed' }, revision: 5 })
+    expect(seam.scope.get()).toEqual({ answerModel: 'changed' })
+    await expect(seam.face.update({ answerModel: 'stale' }, 4)).rejects.toMatchObject({ code: 'SETTINGS_CONFLICT' })
+    expect(value.answerModel).toBe('changed')
+  })
+
+  it('does not guess an entry when its owner has no profile entry', async () => {
+    const service = { ...formsLike(), update: vi.fn() }
+    const seam = openSettingsSeam(service, NS, SCHEMA, () => undefined)
+    if (!seam.ok) throw new Error(seam.reason)
+    await expect(seam.face.update({ answerModel: 'unsafe' }, 0)).rejects.toThrow('no owning profile entry')
+    expect(service.update).not.toHaveBeenCalled()
+  })
+
+  it('waits until the host describes the active plugin, then reads live edits', () => {
+    let descriptors: unknown[] = []
+    const describe = vi.fn(() => descriptors)
+    const seam = openSettingsSeam({ ...formsLike(), describe }, NS, SCHEMA, () => 'custom')
+    if (!seam.ok) throw new Error(seam.reason)
+    expect(describe).not.toHaveBeenCalled()
+    expect(seam.face.get().value).toBeUndefined()
+    descriptors = [{ ns: 'custom', value: { trimWindowMessages: 42 }, revision: 2 }]
+    expect(seam.scope.get()).toEqual({ trimWindowMessages: 42 })
+    expect(describe).toHaveBeenLastCalledWith({ redactSecrets: true })
+  })
+
+  it('refuses incomplete forms services', () => {
+    expect(openSettingsSeam({ describe: () => [] }, NS, SCHEMA, () => 'custom')).toMatchObject({ ok: false })
+  })
+})
+
 describe('the host half uses the probe (issue #19 wiring guard)', () => {
   const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
 

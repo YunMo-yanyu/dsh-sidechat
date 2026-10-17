@@ -1,10 +1,5 @@
-/**
- * Configuration for the host summarize service and the side-session answer
- * model. The user-facing knobs live in the DSH settings service under the
- * `sidechat` namespace (schemastery schema); deployments without a settings
- * service fall back to {@link SIDECHAT_DEFAULTS}.
- */
-import z from 'schemastery'
+/** Settings for context processing and legacy follow-up operations. */
+import z from '@deepseek-ai/schemastery'
 
 /** Settings namespace id. */
 export const SIDECHAT_SETTINGS_NS = 'sidechat'
@@ -87,3 +82,8 @@ export const SidechatPrefsSchema = z.object({
   answerReasoningEffort: z.union(['off', 'high', 'max']).default(SIDECHAT_DEFAULTS.answerReasoningEffort),
   titleBudgetTokens: z.number().step(1).min(16).max(256).default(SIDECHAT_DEFAULTS.titleBudgetTokens),
 })
+
+/** Harness keeps this reference live when profile settings change. */
+export const Config = SidechatPrefsSchema.volatile()
+
+export type SidechatLiveConfig = ReturnType<typeof Config>

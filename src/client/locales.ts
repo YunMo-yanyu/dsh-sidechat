@@ -98,7 +98,7 @@ export const zh = {
   // The DSH settings page the panel is mounted on (`settings-section.tsx`).
   cfgNavLabel: '追问',
   cfgSectionTitle: '追问面板',
-  cfgSectionDesc: '追问会话使用的模型、上下文压缩策略与预算，写入 sidechat 命名空间。',
+  cfgSectionDesc: '追问相关设置保存到当前插件配置，修改后立即生效。',
   cfgLoading: '加载配置…',
   cfgCatalogInherit: '继承被追问会话',
   cfgHistoryStrategyLabel: '上下文策略',
@@ -212,7 +212,7 @@ export const en: Record<CopyKey, string> = {
   // The DSH settings page the panel is mounted on (`settings-section.tsx`).
   cfgNavLabel: 'Follow-up',
   cfgSectionTitle: 'Follow-up panel',
-  cfgSectionDesc: 'The model, context strategy and budgets follow-up sessions use, stored in the sidechat namespace.',
+  cfgSectionDesc: 'Follow-up settings are saved to the current plugin configuration and apply immediately.',
   cfgLoading: 'Loading settings…',
   cfgCatalogInherit: 'Inherit from the asked session',
   cfgHistoryStrategyLabel: 'Context strategy',

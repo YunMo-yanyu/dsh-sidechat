@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SIDECHAT_DEFAULTS, SidechatPrefsSchema } from '../src/config.ts'
+import { Config, SIDECHAT_DEFAULTS, SidechatPrefsSchema } from '../src/config.ts'
 
 /**
  * Regression guard for the PR #3 class of bug ("panel changes fail to save"):
@@ -16,6 +16,11 @@ function parse(input: unknown): unknown {
 }
 
 describe('SidechatPrefsSchema (settings registration surface)', () => {
+  it('exports a native volatile Config with defaults and validation', () => {
+    expect(Config.meta.volatile).toBe(true)
+    expect(Config({ answerModel: 'saved-model' }).get()).toEqual({ ...SIDECHAT_DEFAULTS, answerModel: 'saved-model' })
+    expect(() => Config({ trimWindowMessages: 0 })).toThrow()
+  })
   it('parses an empty config into the full defaults (registration with no user config)', () => {
     expect(parse({})).toEqual(SIDECHAT_DEFAULTS)
   })

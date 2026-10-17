@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.1
+
+- Fixed settings integration with schema-derived Harness configuration forms.
+- Exported a native live Config schema and addressed settings by the owning profile entry.
+- Restored the settings page, with revision-guarded saves and persistent live updates.
+- Preserved configured profile values when the optional settings service is unavailable.
+
 ## 1.3.0
 
 - Unified repository, package, plugin identifiers, API routes, and documentation under `dsh-sidechat` / Sidechat.
